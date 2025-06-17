@@ -38,6 +38,7 @@ io.on('connection', async (socket) => {
         validateOnly: false
       });
       boardState.set(socket.id, getSudoku(data.difficulty || 'easy'));
+      console.log(data.difficulty)
     }
     console.log(`Client ${socket.id} joined room: ${data.roomId}`);
     roomControl.set(data.roomId, (roomControl.get(data.roomId) || 0) + 1);
