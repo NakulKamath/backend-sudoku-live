@@ -17,13 +17,14 @@ await admin.connect();
 const roomControl = new Map<string, Set<string>>();
 const roomConsumer = new Map<string, ConsumerRunner>();
 const boardState = new Map<string, any>();
+const prevPosition = new Map<string, number>();
 
 type BoardCell = {
   mutable: boolean;
   value: number | null;
   correct?: boolean | null;
-  notes?: Set<number>;
-  users?: Set<string>;
+  notes?: number[];
+  users?: string[];
 }
 
 const app = express();
@@ -75,31 +76,39 @@ class ConsumerRunner {
 io.on('connection', async (socket) => {
   console.log('New client connected', socket.id);
 
+  socket.on('check-room', (data, callback) => {
+    const exists = boardState.has(data.roomId);
+    callback({ exists });
+  });
   socket.on('join-room', async (data) => {
     if (data.roomId === socket.id) {
-      await admin.createTopics({
-        topics: [{ topic: socket.id, numPartitions: 1 }],
-        validateOnly: false
-      });
-      boardState.set(socket.id, getSudoku(data.difficulty || 'easy'));
-      const puzzle: string = boardState.get(socket.id).puzzle;
-      const state: BoardCell[] = Array.from(puzzle).map((char) => {
-        if (char === '-') {
-          return {
-            mutable: true,
-            value: null,
-            correct: null,
-            notes: new Set<number>(),
-            users: new Set<string>(),
-          };
-        } else {
-          return {
-            mutable: false,
-            value: Number(char),
-          };
-        }
-      });
-      boardState.get(socket.id).state = state;
+      if (boardState.has(socket.id)) {
+        console.log(`Client ${socket.id} rejoined room: ${data.roomId}`);
+      } else {
+        await admin.createTopics({
+          topics: [{ topic: socket.id, numPartitions: 1 }],
+          validateOnly: false
+        });
+        boardState.set(socket.id, getSudoku(data.difficulty || 'easy'));
+        const puzzle: string = boardState.get(socket.id).puzzle;
+        const state: BoardCell[] = Array.from(puzzle).map((char) => {
+          if (char === '-') {
+              return {
+              mutable: true,
+              value: null,
+              correct: null,
+              notes: [],
+              users: [],
+              };
+          } else {
+            return {
+              mutable: false,
+              value: Number(char),
+            };
+          }
+        });
+        boardState.get(socket.id).state = state;
+      }
     }
     console.log(`Client ${socket.id} joined room: ${data.roomId}`);
     roomControl.set(data.roomId, (roomControl.get(data.roomId) || new Set<string>).add(socket.id));
@@ -129,6 +138,23 @@ io.on('connection', async (socket) => {
         }
         boardState.delete(data.roomId);
       }
+      if (prevPosition.has(socket.id)) {
+        const state = boardState.get(data.roomId)?.state;
+        if (state) {
+          for (const cell of state) {
+            if (cell.users) {
+              cell.users = cell.users.filter(user => user !== socket.id);
+            }
+          }
+        }
+        producer.send({
+          topic: data.roomId,
+          messages: [
+            { key: socket.id + '/pos', value: prevPosition.get(socket.id)?.toString() + '/' },
+          ],
+        });
+        prevPosition.delete(socket.id);
+      }
     });
   });
   socket.on('send-message', async (data) => {
@@ -142,46 +168,65 @@ io.on('connection', async (socket) => {
   });
   socket.on('send-event', async (data) => {
     const { roomId, event, name } = data;
+    console.log(data);
     if (boardState.has(roomId)) {
       const state = boardState.get(roomId).state;
       if (event.type === 'updateCell') {
-        const { index, value } = event.payload;
+        const { index, value } = event;
+        const answer = boardState.get(roomId).solution;
         if (state[index].mutable) {
           state[index].value = value;
+          state[index].correct = answer[index] === value.toString();
           await producer.send({
             topic: roomId,
             messages: [
-              { key: socket.id + '/' + name + '/move', value: value.toString() },
+              { key: socket.id + '/' + name + '/move', value: index.toString() + '/' + value.toString() + '/' + (state[index].correct ? '1' : '0') },
             ],
           });
         }
       } else if (event.type === 'addNote') {
-        const { index, note } = event.payload;
+        const { index, note } = event;
         if (state[index].mutable) {
-          state[index].notes.add(note);
+          state[index].notes.push(note);
           await producer.send({
             topic: roomId,
             messages: [
-              { key: socket.id + '/' + name + '/note', value: note.toString() },
+              { key: socket.id + '/' + name + '/addNote', value: index.toString() + '/' + note.toString() },
             ],
           });
         }
       } else if (event.type === 'removeNote') {
-        const { index, note } = event.payload;
+        const { index, note } = event;
         if (state[index].mutable) {
-          state[index].notes.delete(note);
+          state[index].notes = state[index].notes.filter((n: number) => n !== note);
           await producer.send({
             topic: roomId,
-            messages: [ { key: socket.id + '/' + name + '/noteRemove', value: note.toString() }],
+            messages: [ { key: socket.id + '/' + name + '/removeNote', value: index.toString() + '/' + note.toString() }],
           });
         }
       } else if (event.type === 'movePosition') {
-        const { index } = event.payload;
+        const { prev, index } = event;
         if (state[index].mutable) {
-          state[index].users.add(socket.id);
+          if (prev) {
+            state[prev].users = state[prev].users.filter(user => user !== name);
+          }
+          state[index].users.push(name);
+          const prevStr = prev ? prev.toString() : ''; 
           await producer.send({
             topic: roomId,
-            messages: [ { key: socket.id + '/' + name + '/pos', value: index.toString() }],
+            messages: [ { key: socket.id + '/' + name + '/pos', value: (prevStr + '/' + index.toString()) }],
+          });
+          prevPosition.set(socket.id, index);
+        }
+      } else if (event.type === 'clear') {
+        const { index } = event;
+        if (state[index].mutable) {
+          state[index].value = null;
+          state[index].notes = [];
+          state[index].users = [];
+          await producer.send({
+            topic: roomId,
+            messages: [ { key: socket.id + '/' + name + '/clear', value: index.toString() }],
           });
         }
       }
@@ -199,6 +244,9 @@ app.get('/', (req, res) => {
 });
 
 const gracefulShutdown = async () => {
+  io.sockets.sockets.forEach((socket) => {
+    socket.disconnect(true);
+  });
   await admin.listTopics().then(async (topics) => {
     for (const topic of topics) {
       if (topic !== '__consumer_offsets') {
