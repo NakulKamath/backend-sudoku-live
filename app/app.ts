@@ -288,7 +288,7 @@ io.on('connection', async (socket) => {
   });
 });
 
-server.listen(3000, '127.0.0.1', () => {
+server.listen(4000, '127.0.0.1', () => {
   console.log('Server running on http://127.0.0.1:3000');
 });
 app.use(cors());
