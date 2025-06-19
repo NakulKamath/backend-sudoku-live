@@ -80,6 +80,20 @@ io.on('connection', async (socket) => {
     const exists = boardState.has(data.roomId);
     callback({ exists });
   });
+  socket.on('reset-room', async (data) => {
+    if (boardState.has(data.roomId)) {
+      boardState.delete(data.roomId);
+      await admin.deleteTopics({ topics: [data.roomId] });
+      const consumer = roomConsumer.get(data.roomId);
+      if (consumer) {
+        await consumer.consumer.disconnect();
+        roomConsumer.delete(data.roomId);
+        console.log(`Disconnected consumer for room ${data.roomId}`);
+      }
+      roomControl.delete(data.roomId);
+      console.log(`Deleted topic for room ${data.roomId}`);
+    }
+  });
   socket.on('join-room', async (data) => {
     if (data.roomId === socket.id) {
       if (boardState.has(socket.id)) {
@@ -108,6 +122,8 @@ io.on('connection', async (socket) => {
           }
         });
         boardState.get(socket.id).state = state;
+        boardState.get(socket.id).mistakes = [0, data.difficulty === 'easy' ? 5 : data.difficulty === 'medium' ? 3 : data.difficulty === 'hard' ? 2 : 1];
+        boardState.get(socket.id).total = Array.from(puzzle).filter(char => char === '-').length;
       }
     }
     console.log(`Client ${socket.id} joined room: ${data.roomId}`);
@@ -120,6 +136,7 @@ io.on('connection', async (socket) => {
       console.log(`Created consumer for room ${data.roomId}`);
     }
     socket.emit('board-state', boardState.get(data.roomId).state);
+    socket.emit('mistakes', boardState.get(data.roomId).mistakes);
 
     socket.on('disconnect', async () => {
       console.log(`Client ${socket.id} disconnected`);
@@ -168,7 +185,9 @@ io.on('connection', async (socket) => {
   });
   socket.on('send-event', async (data) => {
     const { roomId, event, name } = data;
-    console.log(data);
+    if (!boardState.has(roomId) || boardState.get(roomId).total === 0) {
+      return;
+    }
     if (boardState.has(roomId)) {
       const state = boardState.get(roomId).state;
       if (event.type === 'updateCell') {
@@ -183,6 +202,33 @@ io.on('connection', async (socket) => {
               { key: socket.id + '/' + name + '/move', value: index.toString() + '/' + value.toString() + '/' + (state[index].correct ? '1' : '0') },
             ],
           });
+          if (state[index].correct) {
+            boardState.get(roomId).total--;
+            if (boardState.get(roomId).total === 0) {
+              const sockets = roomControl.get(roomId);
+              if (sockets) {
+                for (const socketId of sockets) {
+                  const clientSocket = io.sockets.sockets.get(socketId);
+                  if (clientSocket) {
+                  clientSocket.emit('win');
+                  }
+                }
+              }
+            }
+          } else {
+            boardState.get(roomId).mistakes[0]++;
+            if (boardState.get(roomId).mistakes[0] >= boardState.get(roomId).mistakes[1]) {
+              const sockets = roomControl.get(roomId);
+              if (sockets) {
+                for (const socketId of sockets) {
+                  const clientSocket = io.sockets.sockets.get(socketId);
+                  if (clientSocket) {
+                    clientSocket.emit('lose');
+                  }
+                }
+              }
+            }
+          }
         }
       } else if (event.type === 'addNote') {
         const { index, note } = event;
@@ -206,7 +252,15 @@ io.on('connection', async (socket) => {
         }
       } else if (event.type === 'movePosition') {
         const { prev, index } = event;
-        if (state[index].mutable) {
+        if (!index) {
+          if (prev) {
+            state[prev].users = state[prev].users.filter(user => user !== name);
+          }
+          await producer.send({
+            topic: roomId,
+            messages: [ { key: socket.id + '/' + name + '/pos', value: (prev.toString() + '/') }],
+          });
+        } else if (state[index].mutable) {
           if (prev) {
             state[prev].users = state[prev].users.filter(user => user !== name);
           }
