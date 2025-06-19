@@ -54,7 +54,7 @@ class ConsumerRunner {
 
   async run() {
     await this.consumer.run({
-      eachMessage: async ({message }) => {
+      eachMessage: async ({ message }: { message: any }) => {
         const sockets = roomControl.get(this.roomId);
         if (sockets) {
           for (const socketId of sockets) {
@@ -160,7 +160,7 @@ io.on('connection', async (socket) => {
         if (state) {
           for (const cell of state) {
             if (cell.users) {
-              cell.users = cell.users.filter(user => user !== socket.id);
+                cell.users = cell.users.filter((user: string) => user !== socket.id);
             }
           }
         }
@@ -254,7 +254,7 @@ io.on('connection', async (socket) => {
         const { prev, index } = event;
         if (!index) {
           if (prev) {
-            state[prev].users = state[prev].users.filter(user => user !== name);
+            state[prev].users = state[prev].users.filter((user: string) => user !== name);
           }
           await producer.send({
             topic: roomId,
@@ -262,7 +262,7 @@ io.on('connection', async (socket) => {
           });
         } else if (state[index].mutable) {
           if (prev) {
-            state[prev].users = state[prev].users.filter(user => user !== name);
+            state[prev].users = state[prev].users.filter((user: string) => user !== name);
           }
           state[index].users.push(name);
           const prevStr = prev ? prev.toString() : ''; 
@@ -293,9 +293,6 @@ server.listen(3000, '127.0.0.1', () => {
 });
 app.use(cors());
 app.use(express.json());
-app.get('/', (req, res) => {
-  res.send('Hello World!');
-});
 
 const gracefulShutdown = async () => {
   io.sockets.sockets.forEach((socket) => {
